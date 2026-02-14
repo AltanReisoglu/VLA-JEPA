@@ -750,7 +750,9 @@ class LeRobotSingleDataset(Dataset):
             action.append(data[action_key])
         action = np.concatenate(action, axis=1)
         
-        return dict(action=action, image=images, language=language)
+        #return dict(action=action, image=images, language=language)
+        return dict(action=action, image=images, lang=language, video=images) # TODO: fix video return for SingleDataset needed
+        
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.

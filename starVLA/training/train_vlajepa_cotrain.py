@@ -266,13 +266,14 @@ class VLAMTrainer(TrainerUtils):
             )
             batch_vla = next(self.vla_iter)
 
-        try:
-            batch_vlm = next(self.vlm_iter)
-        except StopIteration:
-            if not hasattr(self, "vlm_epoch_count"):
-                self.vlm_epoch_count = 0
-            self.vlm_iter, self.vlm_epoch_count = self._reset_dataloader(self.video_train_dataloader, self.vlm_epoch_count)
-            batch_vlm = next(self.vlm_iter)
+        batch_vlm = None  # Disabled VLM for pure VLA training (VLA_JEPA compatibility)
+        # try:
+        #     batch_vlm = next(self.vlm_iter)
+        # except StopIteration:
+        #     if not hasattr(self, "vlm_epoch_count"):
+        #         self.vlm_epoch_count = 0
+        #     self.vlm_iter, self.vlm_epoch_count = self._reset_dataloader(self.video_train_dataloader, self.vlm_epoch_count)
+        #     batch_vlm = next(self.vlm_iter)
 
         return batch_vla, batch_vlm
 
@@ -397,48 +398,27 @@ class VLAMTrainer(TrainerUtils):
             self.optimizer.step()
             self.lr_scheduler.step()
 
-            self.optimizer.zero_grad()
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                vlm_output = self.model.forward(batch_vlm)
-                vlm_loss = sum(vlm_output.values())
+            # Disabled VLM step to prevent crashing and redundant computation
+            # self.optimizer.zero_grad()
+            # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            #     vlm_output = self.model.forward(batch_vlm)
+            #     vlm_loss = sum(vlm_output.values())
 
-            self.accelerator.backward(vlm_loss)
-            # gradient clipping
-            if self.config.trainer.gradient_clipping is not None:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+            # self.accelerator.backward(vlm_loss)
+            # # gradient clipping
+            # if self.config.trainer.gradient_clipping is not None:
+            #     self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
 
-            # optimizer step
-            self.optimizer.step()
-            self.lr_scheduler.step()
-
-            """
-            self.optimizer.zero_grad()
-            #dist.barrier()  # @DEBUG
-            #pass
-            #============= Step 2
-            # VLM task forward propagation
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                vlm_output = self.model.forward(batch_vlm)
-                vlm_loss = sum(vlm_output.values())
-
-            self.accelerator.backward(vlm_loss)
-
-            #pass
-
-            #dist.barrier() #@DEBUG
-            # gradient clipping
-            if self.config.trainer.gradient_clipping is not None:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
-
-            # optimizer step
-            self.optimizer.step()
-            self.lr_scheduler.step()
-            """
+            # # optimizer step
+            # self.optimizer.step()
+            # self.lr_scheduler.step()
+            
+            vlm_output = {}
 
         for k, v in output_dict.items():
             log_dict[f"vla_{k}"] = v.item()
-        for k, v in vlm_output.items():
-            log_dict[f"vlm_{k}"] = v.item()
+        # for k, v in vlm_output.items():
+        #     log_dict[f"vlm_{k}"] = v.item()
         return log_dict
 
     def _finalize_training(self):

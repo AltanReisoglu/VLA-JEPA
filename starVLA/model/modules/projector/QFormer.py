@@ -183,3 +183,7 @@ def get_layerwise_qformer(num_heads=8, config=None, **kwargs):
         config=config,
     )
     return qformer
+
+if __name__ == "__main__":
+    qformer = get_layerwise_qformer()
+    print(qformer)

@@ -1,3 +1,12 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+print("torch version:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+
+
 # Copyright 2025 starVLA community. All rights reserved.
 # Licensed under the MIT License, Version 1.0 (the "License");
 # Implemented by [Junqiu YU / Fudan University] in [2025]. 
@@ -28,7 +37,6 @@ from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.modules.action_model.GR00T_ActionHeader import get_action_model, FlowmatchingActionHead
 from starVLA.model.modules.world_model.vj2_predictor import VisionTransformerPredictorAC
-from starVLA.model.framework.AdapterX import MultiModalTargetEncoder
 from starVLA.training.trainer_utils.trainer_tools import resize_images
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 
@@ -68,15 +76,10 @@ class VLA_JEPA(baseframework):
             embodied_action_token=embodied_action_token
         )
 
-
-
         # TODO speical tokens
 
         # align dims --> we should put them to config or no?
-        # align dims --> we should put them to config or no?
-        hidden_size = getattr(self.qwen_vl_interface.model.config, "hidden_size", getattr(self.qwen_vl_interface.model.config, "d_model", 2048))
-
-        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = hidden_size
+        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = self.qwen_vl_interface.model.config.hidden_size
 
         self.action_model: FlowmatchingActionHead = get_action_model(config=self.config)  # 修复后续引用
 
@@ -84,10 +87,23 @@ class VLA_JEPA(baseframework):
         self.past_action_window_size = config.framework.action_model.past_action_window_size
         self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
         
-        self.vj_encoder = AutoModel.from_pretrained(self.config.framework.vj2_model.base_encoder, device_map="cuda")
+        self.vj_encoder = AutoModel.from_pretrained(self.config.framework.vj2_model.base_encoder)
         self.vj_processor = AutoVideoProcessor.from_pretrained(self.config.framework.vj2_model.base_encoder)
 
-        # Text Encoder (Gemma) - Moved up to get hidden size
+        tubelet_size = self.vj_encoder.config.tubelet_size
+        self.vj_predictor = VisionTransformerPredictorAC(
+            num_frames=self.config.framework.vj2_model.num_frames//tubelet_size,
+            img_size=((self.vj_encoder.config.image_size, self.vj_encoder.config.image_size)),
+            tubelet_size=1,
+            depth=self.config.framework.vj2_model.depth,
+            num_heads=self.config.framework.vj2_model.num_heads,
+            embed_dim=self.vj_encoder.config.hidden_size * 2, # multi view
+            action_embed_dim=self.qwen_vl_interface.model.config.hidden_size,
+            text_embed_dim=self.config.framework.vj2_model.get("text_embed_dim", 300),
+            num_add_tokens=self.config.framework.vj2_model.num_action_tokens_per_timestep + self.config.framework.vj2_model.get("num_text_tokens", 1),
+        )
+
+        # Text Encoder (Gemma)
         from starVLA.model.modules.sub_system.embedding_gemma import EmbeddingGemmaInterface, EmbeddingGemmaConfig
         text_encoder_cfg = self.config.framework.get("text_encoder", {})
         self.gemma_cfg = EmbeddingGemmaConfig(
@@ -96,33 +112,14 @@ class VLA_JEPA(baseframework):
         )
         self.gemma_interface = EmbeddingGemmaInterface(self.gemma_cfg)
 
-        tubelet_size = self.vj_encoder.config.tubelet_size
-        
-        # Calculate predictor output dimension (Visual + Text) * Views
-        # Assuming 2 views based on hardcoded * 2
-        visual_dim = self.vj_encoder.config.hidden_size
-        text_dim = self.gemma_interface.hidden_size
-        predictor_output_dim = (visual_dim + text_dim) * 2
-
-        self.vj_predictor = VisionTransformerPredictorAC(
-            num_frames=self.config.framework.vj2_model.num_frames//tubelet_size,
-            img_size=((self.vj_encoder.config.image_size, self.vj_encoder.config.image_size)),
-            tubelet_size=1,
-            depth=self.config.framework.vj2_model.depth,
-            num_heads=self.config.framework.vj2_model.num_heads,
-            embed_dim=visual_dim * 2, # multi view input (Visual only)
-            action_embed_dim=hidden_size, # Use the safe hidden_size variable
-            num_add_tokens=self.config.framework.vj2_model.num_action_tokens_per_timestep,
-            output_dim=predictor_output_dim, # Output Visual + Text
-        )
-
-        # Multimodal Projector for World Model Target (Teacher)
-        self.teacher_encoder = MultiModalTargetEncoder(
-            vjepa_path=self.vj_encoder,
-            text_model=self.gemma_interface.model,
-            num_fusion_layers=4,
-            freeze_vjepa=True,
-            freeze_text=True 
+        # Multimodal Projector for World Model Target
+        # Projects [Video_Emb + Text_Emb] -> original video embedding space
+        v_dim = self.vj_encoder.config.hidden_size * 2
+        t_dim = self.config.framework.vj2_model.get("text_embed_dim", 300)
+        self.multimodal_projector = nn.Sequential(
+            nn.Linear(v_dim + t_dim, v_dim),
+            nn.GELU(),
+            nn.Linear(v_dim, v_dim)
         )
 
         self.replace_prompt = "".join(
@@ -131,6 +128,7 @@ class VLA_JEPA(baseframework):
         )
 
         self.embodied_replace_prompt = "".join([embodied_action_token * self.config.framework.vj2_model.num_embodied_action_tokens_per_instruction])
+
 
     def expand_tokenizer(self, 
                          tokenizer: AutoTokenizer,
@@ -245,96 +243,49 @@ class VLA_JEPA(baseframework):
             #print(action_tokens.shape, last_hidden.shape, embodied_action_tokens.shape)
             #exit()
         
-            # Step 2: JEPA Encoder (Student - Context)
+            # Step 2: JEPA Encoder
             B, V, T, C, H, W = batch_videos.shape
             batch_videos = batch_videos.reshape(B*V, T, C, H, W)  # [B*V, T, C, H, W]
             input_videos = []
             for i in range(B*V):
-                processed = self.vj_processor(
+                input_videos.append(self.vj_processor(
                     videos=batch_videos[i], return_tensors="pt"
-                )["pixel_values_videos"].to(self.vj_encoder.device)
-                if processed.dim() == 4:
-                    processed = processed.unsqueeze(0)
-                input_videos.append(processed)
+                )["pixel_values_videos"].to(self.vj_encoder.device))
             input_videos = torch.cat(input_videos, dim=0)  # [B*V, T, C, H, W]
-            print(f"DEBUG: input_videos shape: {input_videos.shape}")
-            
-            # Student visual features
             with torch.no_grad():
                 video_embeddings = self.vj_encoder.get_vision_features(pixel_values_videos=input_videos)
-                # video_embeddings is [B*V, T, N, D] (4D)
-                # Chunk splits batch: [ (B, T, N, D), (B, T, N, D) ]
-                # Cat dim=3 (Feature) -> [B, T, N, D*2]
-                video_embeddings = torch.cat(torch.chunk(video_embeddings, chunks=V, dim=0), dim=-1)
-                
-                # Flatten T and N -> [B, T*N, D*2]
-                # B_student, T_student, N_student, D_student_2 = video_embeddings.shape
-                # video_embeddings = video_embeddings.view(B_student, T_student * N_student, D_student_2)
-                
-                # Note: v_jepa typically returns 3D [Batch, Sequence, Dim] where Sequence = Time*Tokens
-                # So we don't need to manually flatten if it's already flat.
-                # However, if it returns 4D [Batch, Time, Tokens, Dim], then we need to know.
-                # AdapterX suggests it returns [Batch, Time, Tokens, Dim] then reshapes to [Batch*Time, Tokens, Dim]
-                # If so, video_embeddings here is [Batch*V, Time, Tokens, Dim].
-                # If we chunk D=0, we get B*V -> V * [Batch, Time, Tokens, Dim].
-                # If we concat D=-1 (Dim), we get [Batch, Time, Tokens, Dim*V].
-                # Then we need to flatten Time+Tokens: view(Batch, -1, Dim*V).
-                
-                # Given error "not enough values to unpack (expected 4, got 3)", it means:
-                # video_embeddings is 3D! [Batch, Sequence, Dim].
-                # So chunk(0) -> V * [Batch/V, Sequence, Dim]. (Wait, chunk on 0 splits Batch*V -> Batch).
-                # Cat(-1) -> [Batch, Sequence, Dim*V]. This is correct shape for predictor.
-                pass
-            
+                video_embeddings = torch.cat(torch.chunk(video_embeddings, chunks=V, dim=0), dim=2)
+            #print(video_embeddings.shape) # [B, T//tubelet_size * dim_per_frame, V*embed_dim]
+        
             # Step 3: VJ Predictor
-            T_encoded = video_embeddings.shape[1] # Time * Spatial Tokens (Sequence Length)
-            
-            # Determine temporal parameters
-            B_V, T_original, C, H, W = input_videos.shape
-            
-            num_tokens = video_embeddings.shape[1]
-            tubelet_size = self.vj_encoder.config.tubelet_size
-            num_latents_temporal = T_original // tubelet_size
-            tokens_per_latent = num_tokens // num_latents_temporal
-            
-            # Student Context: first (num_latents - 1) latent steps
-            input_states = video_embeddings[:, :tokens_per_latent * (num_latents_temporal - 1), :]
-            
-            # Get Teacher Targets using AdapterX
+            # Get text embeddings for conditioning and multimodal target
             with torch.no_grad():
-                 teacher_multimodal_features = self.teacher_encoder(
-                     images=input_videos, # [B*V, T, C, H, W]
-                     action_descriptions=instructions * V # Repeat instructions for each view if V>1
-                 )
-                 # AdapterX output: [B*V, T, N, D] (4D tensor)
-                 
-                 B_V, T_t, N, D_t = teacher_multimodal_features.shape
-                 teacher_flat = teacher_multimodal_features
-                 
-                 # Concatenate views [B, T*N, D*V]
-                 # first reshape back to [B, V, T, N, D]
-                 teacher_flat = teacher_flat.view(B, V, T_t, N, D_t)
-                 # Concat features: [B, T, N, D*V]
-                 teacher_flat = torch.cat([teacher_flat[:, i, :, :, :] for i in range(V)], dim=-1) 
-                 
-                 # Flatten T and N -> [B, T*N, D*V]
-                 teacher_flat = teacher_flat.view(B, T_t * N, D_t * V)
-                 
-                 # Slice target (last latent step)
-                 gt_multimodal = teacher_flat[:, tokens_per_latent * (num_latents_temporal - 1):, :]
+                text_embeddings = self.gemma_interface(instructions) # [B, 300]
+            
+            T = T // self.vj_encoder.config.tubelet_size
+            input_states = video_embeddings[:, :video_embeddings.shape[1] // T * (T-1),:]  # [B, (T-1)*dim_per_frame, V*embed_dim]
+            gt_states = video_embeddings[:, video_embeddings.shape[1] // T:, :]
             
             predicted_states = self.vj_predictor(
                 input_states,
-                action_tokens
+                action_tokens,
+                text_embeddings=text_embeddings
             )
-            # Slice predicted states to match target (last latent step)
-            predicted_states = predicted_states[:, -tokens_per_latent:, :]
+
+            # Multimodal target projection (Video + Text)
+            # Repeated text across frame tokens in gt_states [B, L, D]
+            B, L_video, _ = gt_states.shape
+            text_repeated = text_embeddings.unsqueeze(1).repeat(1, L_video, 1) # [B, L, 300]
+            gt_multimodal = torch.cat([gt_states, text_repeated], dim=-1) # [B, L, H_v + 300]
+            
+            target_multimodal = self.multimodal_projector(gt_multimodal)
 
             teacher_forcing_wm_loss = F.l1_loss(
                 predicted_states,
-                gt_multimodal,
+                target_multimodal,
                 reduction="mean"
             )
+
         
         if "action" not in examples[0]:
             return {"wm_loss": teacher_forcing_wm_loss}
@@ -438,16 +389,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_yaml", type=str, default="./starVLA/config/training/starvla_cotrain_oxe.yaml", help="Path to YAML config")
     args, clipargs = parser.parse_known_args()
-    
-    # debugpy.listen(("localhost", 10092))
-    # print("🔍 Rank 0 waiting for debugger attach on port 10092...")
-    # debugpy.wait_for_client()
+
+    debugpy.listen(("0.0.0.0", 10092))
+    print("🔍 Rank 0 waiting for debugger attach on port 10092...")
+    debugpy.wait_for_client()
 
     cfg = OmegaConf.load(args.config_yaml)
     # try get model
-    cfg.framework.qwenvl.base_vlm = "Qwen/Qwen2.5-VL-3B-Instruct" 
+    cfg.framework.qwenvl.base_vlm = "./playground/Pretrained_models/Qwen3-VL-4B-Instruct"
      
-    model: VLA_JEPA = VLA_JEPA(cfg)
+    model: Qwen_GR00T = Qwen_GR00T(cfg)
     print(model)
 
 
@@ -458,46 +409,13 @@ if __name__ == "__main__":
     sample = {
         "action": np.random.uniform(-1, 1, size=(16, 7)).astype(np.float16), # action_chunk, action_dim
         "image": [image, image], # two views
-        "video": np.random.randint(0, 255, (2, 8, 224, 224, 3), dtype=np.uint8), # [V, T, H, W, 3]
         "lang": "This is a fake for testing.",
         "state" : np.random.uniform(-1, 1, size=(1, 7)).astype(np.float16), # chunk, state_dim
     }
 
-    batch  = [sample]  # batch size 1
+    batch  = [sample, sample]  # batch size 2
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # model = model.to(device) # Can't move whole model due to Qwen/Accelerate usage
-    # Move scratch-training components if needed
-    for module in [model.vj_predictor, model.action_model]:
-        try:
-            module.to(device)
-        except NotImplementedError:
-            print(f"Moving {type(module).__name__} from meta device using to_empty (weights uninitialized!)")
-            module.to_empty(device=device)
-            if hasattr(module, 'reset_parameters'):
-                module.reset_parameters()
-            elif hasattr(module, 'apply'):
-                # Try to apply reset logic
-                def init_weights(m):
-                    if hasattr(m, 'reset_parameters'):
-                        m.reset_parameters()
-                    elif hasattr(m, 'weight') and m.weight.dim() > 1:
-                        nn.init.xavier_uniform_(m.weight)
-                    elif hasattr(m, 'bias') and m.bias is not None:
-                        nn.init.zeros_(m.bias)
-                module.apply(init_weights)
-
-    # teacher_encoder (AdapterX) uses accelerate-wrapped models (vj_encoder, gemma), 
-    # so calling .to() on it directly is unsafe/redundant if they are already on device.
-    # It has no trainable weights of its own (frozen fusion removed).
-    
-    # gemma_interface also handles its own device placement (usually).
-    # ensure it's on device if it has trainable parameters not managed by accelerate.
-    try:
-        model.gemma_interface.to(device)
-    except:
-        pass # Gemma likely on device already
-
-    # vj_encoder and qwen_vl_interface are managed by accelerate/device_map="auto"
+    model = model.to(device)
     forward_output = model(batch)
     action_loss = forward_output['action_loss']
     print(f"Action Loss: {action_loss.item()}")

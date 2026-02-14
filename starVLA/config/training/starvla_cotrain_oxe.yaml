@@ -9,9 +9,18 @@ is_debug: false
 framework:
   name: QwenFM
   qwenvl:
-    base_vlm: ./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
+    base_vlm: "Qwen/Qwen2.5-VL-3B-Instruct"
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
+  vj2_model:
+    base_encoder: "facebook/vjepa-vit-h-14"
+    depth: 12
+    num_heads: 8
+    special_action_token: "<|action_{}|>"
+    num_action_tokens_per_timestep: 8
+    embodied_action_token: "<|embodied_action|>"
+    num_embodied_action_tokens_per_instruction: 32
+    num_frames: 8
   dino:
     dino_backbone: dinov2_vits14
 

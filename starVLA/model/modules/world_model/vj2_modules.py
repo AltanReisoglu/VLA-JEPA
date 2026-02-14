@@ -456,7 +456,10 @@ class ACBlock(nn.Module):
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        if use_rope:
+        if kwargs.get('use_latent_attention', False):
+            from starVLA.model.modules.world_model.vj2_predictor import MultiHeadLatentAttention
+            self.attn = MultiHeadLatentAttention(d_model=dim, num_heads=num_heads)
+        elif use_rope:
             self.attn = ACRoPEAttention(
                 dim,
                 num_heads=num_heads,
@@ -501,6 +504,10 @@ class ACBlock(nn.Module):
         x = x + self.drop_path(self.mlp(y))
         return x
 
+    def _uses_mla(self):
+        from starVLA.model.modules.world_model.vj2_predictor import MultiHeadLatentAttention
+        return isinstance(self.attn, MultiHeadLatentAttention)
+
 
 class Block(nn.Module):
     def __init__(
@@ -524,7 +531,10 @@ class Block(nn.Module):
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        if use_rope:
+        if kwargs.get('use_latent_attention', False):
+            from starVLA.model.modules.world_model.vj2_predictor import MultiHeadLatentAttention
+            self.attn = MultiHeadLatentAttention(d_model=dim, num_heads=num_heads)
+        elif use_rope:
             self.attn = RoPEAttention(
                 dim,
                 num_heads=num_heads,
@@ -566,6 +576,10 @@ class Block(nn.Module):
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
+
+    def _uses_mla(self):
+        from starVLA.model.modules.world_model.vj2_predictor import MultiHeadLatentAttention
+        return isinstance(self.attn, MultiHeadLatentAttention)
 
 
 class CrossAttention(nn.Module):

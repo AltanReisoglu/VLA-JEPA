@@ -13,6 +13,55 @@ from starVLA.model.modules.world_model.vj2_modules import ACBlock as Block
 from starVLA.model.modules.world_model.vj2_modules import build_action_block_causal_attention_mask
 from starVLA.model.modules.world_model.vj2_tensors import trunc_normal_
 
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(self, d_model=128*128, num_heads=128, q_latent_dim=12, kv_latent_dim=4):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.q_latent_dim = q_latent_dim
+        self.kv_latent_dim = kv_latent_dim
+        head_dim = d_model // num_heads
+ 
+        # Query projections
+        self.Wq_d = nn.Linear(d_model, q_latent_dim)
+ 
+        # Precomputed matrix multiplications of W_q^U and W_k^U, for multiple heads
+        self.W_qk = nn.Linear(q_latent_dim, num_heads * kv_latent_dim)
+ 
+        # Key/Value latent projections
+        self.Wkv_d = nn.Linear(d_model, kv_latent_dim)
+        self.Wv_u = nn.Linear(kv_latent_dim, num_heads * head_dim)
+ 
+        # Output projection
+        self.Wo = nn.Linear(num_heads * head_dim, d_model)
+ 
+    def forward(self, x, mask=None, attn_mask=None, **kwargs):
+        batch_size, seq_len, d_model = x.shape
+ 
+        # Projections of input into latent spaces
+        C_q = self.Wq_d(x)     # shape: (batch_size, seq_len, q_latent_dim)
+        C_kv = self.Wkv_d(x)   # shape: (batch_size, seq_len, kv_latent_dim)
+ 
+        # Attention score, shape: (batch_size, num_heads, seq_len, seq_len)
+        C_qW_qk = self.W_qk(C_q).view(batch_size, seq_len, self.num_heads, self.kv_latent_dim)
+        scores = torch.matmul(C_qW_qk.transpose(1, 2), C_kv.transpose(-2, -1)[:, None, ...]) / math.sqrt(self.kv_latent_dim)
+ 
+        # Apply attention mask if provided
+        if attn_mask is not None:
+            if attn_mask.dtype == torch.bool:
+                scores = scores.masked_fill(~attn_mask[:scores.size(1), :scores.size(2)].unsqueeze(0).unsqueeze(0), float('-inf'))
+            else:
+                scores = scores + attn_mask[:scores.size(2), :scores.size(3)].unsqueeze(0).unsqueeze(0)
+ 
+        # Attention computation
+        attn_weight = torch.softmax(scores, dim=-1)
+        # Restore V from latent space
+        V = self.Wv_u(C_kv).view(batch_size, seq_len, self.num_heads, -1)
+        # Compute attention output, shape: (batch_size, seq_len, num_heads, head_dim)
+        output = torch.matmul(attn_weight, V.transpose(1,2)).transpose(1,2).contiguous()
+        # Concatentate the heads, then apply output projection
+        output = self.Wo(output.view(batch_size, seq_len, -1))
+        return output
 
 class VisionTransformerPredictorAC(nn.Module):
     """Action Conditioned Vision Transformer Predictor"""
@@ -42,9 +91,11 @@ class VisionTransformerPredictorAC(nn.Module):
         use_activation_checkpointing=False,
         use_rope=True,
         action_embed_dim=7,
+        text_embed_dim=300,
         use_extrinsics=False,
         # added
         num_add_tokens=8,
+        output_dim=None, # Added support for different output dimension
         **kwargs
     ):
         super().__init__()
@@ -54,8 +105,10 @@ class VisionTransformerPredictorAC(nn.Module):
         # Map input to predictor dimension
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.action_encoder = nn.Linear(action_embed_dim, predictor_embed_dim, bias=True)
+        self.text_encoder = nn.Linear(text_embed_dim, predictor_embed_dim, bias=True)
         self.state_encoder = nn.Linear(action_embed_dim, predictor_embed_dim, bias=True)
         self.extrinsics_encoder = nn.Linear(action_embed_dim - 1, predictor_embed_dim, bias=True)
+
 
         # Determine positional embedding
         if type(img_size) is int:
@@ -94,6 +147,7 @@ class VisionTransformerPredictorAC(nn.Module):
                     attn_drop=attn_drop_rate,
                     drop_path=dpr[i],
                     norm_layer=norm_layer,
+                    use_latent_attention=kwargs.get('use_latent_attention', False)
                 )
                 for i in range(depth)
             ]
@@ -101,7 +155,10 @@ class VisionTransformerPredictorAC(nn.Module):
 
         # Normalize & project back to input dimension
         self.predictor_norm = norm_layer(predictor_embed_dim)
-        self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
+        
+        # Handle output dimension
+        final_dim = output_dim if output_dim is not None else embed_dim
+        self.predictor_proj = nn.Linear(predictor_embed_dim, final_dim, bias=True)
 
         # ------ initialize weights
         self.init_std = init_std
@@ -135,10 +192,11 @@ class VisionTransformerPredictorAC(nn.Module):
             rescale(layer.attn.proj.weight.data, layer_id + 1)
             rescale(layer.mlp.fc2.weight.data, layer_id + 1)
 
-    def forward(self, x, actions, extrinsics=None):
+    def forward(self, x, actions, text_embeddings=None, extrinsics=None):
         """
         :param x: context tokens [B, T, p_H*p_W, D]
         :param actions: action tokens [B, T * num, D]
+        :param text_embeddings: text tokens [B, D_txt]
         """
         # Map tokens to predictor dimensions
         x = self.predictor_embed(x)
@@ -150,14 +208,21 @@ class VisionTransformerPredictorAC(nn.Module):
         # Interleave action tokens
         a = self.action_encoder(actions)
         a = a.view(B, T, -1, D)
+
+        if text_embeddings is not None:
+            t = self.text_encoder(text_embeddings) # [B, D]
+            t = t.unsqueeze(1).repeat(1, T, 1).unsqueeze(2) # [B, T, 1, D]
+            a = torch.cat([a, t], dim=2) # Concat text token with action tokens per timestep
+
         cond_tokens = a.shape[2]
         x = x.view(B, T, self.grid_height * self.grid_width, D)  # [B, T, H*W, D]
         if self.use_extrinsics:
             cond_tokens += 1
             e = self.extrinsics_encoder(extrinsics).unsqueeze(2)
-            x = torch.cat([a, e, x], dim=2).flatten(1, 2)  # [B, T*(H*W+3), D]
+            x = torch.cat([a, e, x], dim=2).flatten(1, 2)  # [B, T*(H*W+cond_tokens), D]
         else:
-            x = torch.cat([a, x], dim=2).flatten(1, 2)  # [B, T*(H*W+2), D]
+            x = torch.cat([a, x], dim=2).flatten(1, 2)  # [B, T*(H*W+cond_tokens), D]
+
 
         attn_mask = self.attn_mask[: x.size(1), : x.size(1)].to(x.device, non_blocking=True)
 

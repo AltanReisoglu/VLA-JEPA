@@ -27,3 +27,6 @@ wandb
 rich
 diffusers
 timm
+sentence-transformers
+
+sentence-transformers
