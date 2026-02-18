@@ -7,13 +7,13 @@ wandb_project: llavavla
 is_debug: false
 
 framework:
-  name: QwenFM
+  name: VLA_JEPA
   qwenvl:
     base_vlm: "Qwen/Qwen2.5-VL-3B-Instruct"
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
   vj2_model:
-    base_encoder: "facebook/vjepa-vit-h-14"
+    base_encoder: "facebook/vjepa2-vith-fpc64-256"
     depth: 12
     num_heads: 8
     special_action_token: "<|action_{}|>"

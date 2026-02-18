@@ -40,9 +40,14 @@ from starVLA.dataloader import build_dataloader
 from starVLA.training.trainer_utils.trainer_tools import normalize_dotlist_args
 from starVLA.model.framework import build_framework
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils
+from dotenv import load_dotenv
+load_dotenv()  # Load environment 
+HF_TOKEN = os.getenv("HF_TOKEN")  # Hugging Face token from .env
+from huggingface_hub import login
+login(token=HF_TOKEN)
 
-deepspeed_plugin = DeepSpeedPlugin()
-accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+# deepspeed_plugin = DeepSpeedPlugin()
+accelerator = Accelerator()
 accelerator.print(accelerator.state)
 
 # Sane Defaults

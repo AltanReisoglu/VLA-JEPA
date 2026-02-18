@@ -84,8 +84,8 @@ class VLA_JEPA(baseframework):
         self.past_action_window_size = config.framework.action_model.past_action_window_size
         self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
         
-        self.vj_encoder = AutoModel.from_pretrained(self.config.framework.vj2_model.base_encoder, device_map="cuda")
-        self.vj_processor = AutoVideoProcessor.from_pretrained(self.config.framework.vj2_model.base_encoder)
+        """self.vj_encoder = AutoModel.from_pretrained(self.config.framework.vj2_model.base_encoder, device_map="cuda")
+        self.vj_processor = AutoVideoProcessor.from_pretrained(self.config.framework.vj2_model.base_encoder)"""
 
         # Text Encoder (Gemma) - Moved up to get hidden size
         from starVLA.model.modules.sub_system.embedding_gemma import EmbeddingGemmaInterface, EmbeddingGemmaConfig

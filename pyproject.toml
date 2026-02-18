@@ -28,8 +28,13 @@ classifiers = [
 ]
 dependencies = [
     "debugpy>=1.8.20",
+    "decord>=0.6.0",
     "dotenv>=0.9.9",
+    "numpydantic>=1.7.0",
+    "opencv-python>=4.13.0.92",
+    "pandas>=2.3.3",
     "pydantic>=2.12.5",
+    "tensorboard>=2.20.0",
 ]
 
 [project.optional-dependencies]
