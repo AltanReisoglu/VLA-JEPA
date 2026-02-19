@@ -48,7 +48,34 @@ framework:
     embodied_action_token: "<|embodied_action|>"
     num_embodied_action_tokens_per_instruction: 32
     num_frames: 8
+    num_slots: 7
+    slot_dim: 256
+    num_iterations: 2
+    eps: 1e-8
   reduce_in_full_precision: true
+
+  # ---------------------------------------------------------------------------
+  # Frozen C-JEPA world model  (galilai-group/cjepa)
+  # Weights are downloaded automatically from HuggingFace: HazelNam/CJEPA
+  # Remove / comment-out this block to disable the module entirely.
+  # ---------------------------------------------------------------------------
+  cjepa_frozen:
+    # CLEVRER VideoSAUR best checkpoint (4/7 masked slots)
+    num_slots: 7              # matches CLEVRER (7 slots)
+    slot_dim: 128             # C-JEPA's internal slot dim (fixed by checkpoint)
+    history_frames: 3         # T_hist from CLEVRER config
+    pred_frames: 1            # T_pred from CLEVRER config
+    num_masked_slots: 4       # 4/7 = best performing on CLEVRER
+    freeze_slot_attention: true
+    seed: 42
+    depth: 6
+    heads: 16
+    dim_head: 64
+    mlp_dim: 2048
+    dropout: 0.1
+    hf_repo: "HazelNam/CJEPA"
+    hf_filename: "cjepa-ckpts/clevrer_videosaur_4_epoch_30_object.ckpt"
+    # ckpt_path: "/path/to/local/clevrer_videosaur_4_epoch_30_object.ckpt"
 
 
 datasets:

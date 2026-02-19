@@ -21,8 +21,42 @@ framework:
     embodied_action_token: "<|embodied_action|>"
     num_embodied_action_tokens_per_instruction: 32
     num_frames: 8
+    num_slots: 7
+    slot_dim: 256
+    num_iterations: 2
+    eps: 1e-8
   dino:
     dino_backbone: dinov2_vits14
+
+  # ---------------------------------------------------------------------------
+  # Frozen C-JEPA world model  (galilai-group/cjepa)
+  # Weights are downloaded automatically from HuggingFace: HazelNam/CJEPA
+  # Remove / comment-out this block to disable the module entirely.
+  #
+  # Available HF checkpoints (set hf_filename accordingly):
+  #   PushT  VideoSAUR (*best): cjepa-ckpts/pusht_videosaur_1_epoch_30_object.ckpt  (NUM_SLOTS=4, SLOT_DIM=128, history=5, pred=3)
+  #   CLEVRER VideoSAUR (*best): cjepa-ckpts/clevrer_videosaur_4_epoch_30_object.ckpt (NUM_SLOTS=7, SLOT_DIM=128, history=3, pred=1)
+  #   CLEVRER SAVi     (*best): cjepa-ckpts/clevrer_savi_2_epoch_30_object.ckpt      (NUM_SLOTS=7, SLOT_DIM=128, history=3, pred=1)
+  # ---------------------------------------------------------------------------
+  cjepa_frozen:
+    # Hyper-params must match the chosen checkpoint (clevrer_videosaur_4):
+    num_slots: 7              # matches vj2_model.num_slots=7 (CLEVRER VideoSAUR)
+    slot_dim: 128             # cjepa's internal slot dim (fixed by checkpoint)
+    history_frames: 3         # T_hist used during cjepa training
+    pred_frames: 1            # T_pred used during cjepa training
+    num_masked_slots: 4       # number of slots masked (must match checkpoint; 4/7 for best CLEVRER)
+    freeze_slot_attention: true   # freeze VLA-JEPA's SlotAttention when using frozen C-JEPA masking
+    seed: 42
+    depth: 6
+    heads: 16
+    dim_head: 64
+    mlp_dim: 2048
+    dropout: 0.1
+    # HuggingFace download config:
+    hf_repo: "HazelNam/CJEPA"
+    hf_filename: "cjepa-ckpts/clevrer_videosaur_4_epoch_30_object.ckpt"
+    # Or set ckpt_path to a local file to skip HF download:
+    # ckpt_path: "/path/to/clevrer_videosaur_4_epoch_30_object.ckpt"
 
   action_model:
     action_model_type: DiT-B

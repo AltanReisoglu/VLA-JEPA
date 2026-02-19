@@ -87,12 +87,8 @@ def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
     vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 
-    video_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.video_data.dataset_py)
-
-    accelerator.dataloader_config.dispatch_batches = False
     dist.barrier()
-
-    return vla_train_dataloader, video_train_dataloader
+    return vla_train_dataloader
 
 
 def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
@@ -125,11 +121,11 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
 
 
 class VLAMTrainer(TrainerUtils):
-    def __init__(self, cfg, model, vla_train_dataloader, video_train_dataloader, optimizer, lr_scheduler, accelerator):
+    def __init__(self, cfg, model, vla_train_dataloader, optimizer, lr_scheduler, accelerator):
         self.config = cfg
         self.model = model
         self.vla_train_dataloader = vla_train_dataloader
-        self.video_train_dataloader = video_train_dataloader
+        # self.video_train_dataloader = video_train_dataloader # Removed for VLA-JEPA only training
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.accelerator = accelerator
@@ -165,9 +161,9 @@ class VLAMTrainer(TrainerUtils):
         self.print_trainable_parameters(self.model)
 
         # initialize distributed training components
-        self.model, self.optimizer, self.vla_train_dataloader, self.video_train_dataloader = (
+        self.model, self.optimizer, self.vla_train_dataloader = (
             self.setup_distributed_training(
-                self.accelerator, self.model, self.optimizer, self.vla_train_dataloader, self.video_train_dataloader
+                self.accelerator, self.model, self.optimizer, self.vla_train_dataloader
             )
         )
 
@@ -256,7 +252,7 @@ class VLAMTrainer(TrainerUtils):
     def _create_data_iterators(self):
         """create data iterators"""
         self.vla_iter = iter(self.vla_train_dataloader)
-        self.vlm_iter = iter(self.video_train_dataloader)
+        # self.vlm_iter = iter(self.video_train_dataloader)
 
     def _get_next_batch(self):
         """get next batch (automatically handle data loop)"""
@@ -271,16 +267,7 @@ class VLAMTrainer(TrainerUtils):
             )
             batch_vla = next(self.vla_iter)
 
-        batch_vlm = None  # Disabled VLM for pure VLA training (VLA_JEPA compatibility)
-        # try:
-        #     batch_vlm = next(self.vlm_iter)
-        # except StopIteration:
-        #     if not hasattr(self, "vlm_epoch_count"):
-        #         self.vlm_epoch_count = 0
-        #     self.vlm_iter, self.vlm_epoch_count = self._reset_dataloader(self.video_train_dataloader, self.vlm_epoch_count)
-        #     batch_vlm = next(self.vlm_iter)
-
-        return batch_vla, batch_vlm
+        return batch_vla
 
     def train(self):
         """execute training loop"""
@@ -298,10 +285,10 @@ class VLAMTrainer(TrainerUtils):
         # main training loop
         while self.completed_steps < self.config.trainer.max_train_steps:
             # get data batch
-            batch_vla, batch_vlm = self._get_next_batch()
+            batch_vla = self._get_next_batch()
 
             # execute training step
-            step_metrics = self._train_step(batch_vla, batch_vlm)
+            step_metrics = self._train_step(batch_vla)
 
             # update progress
             if self.accelerator.sync_gradients:
@@ -341,7 +328,7 @@ class VLAMTrainer(TrainerUtils):
 
         if self.accelerator.is_main_process:
 
-            examples, vlm_data = self._get_next_batch()
+            examples = self._get_next_batch()
 
             score = 0.0
             num_samples = len(examples)
@@ -382,13 +369,12 @@ class VLAMTrainer(TrainerUtils):
             logger.info(f"  Gradient accumulation steps = {self.config.trainer.gradient_accumulation_steps}")
             logger.info(f"  Total batch size = {self.total_batch_size}")
 
-    def _train_step(self, batch_vla, batch_vlm):
+    def _train_step(self, batch_vla):
         """execute single training step"""
         log_dict = {}
         with self.accelerator.accumulate(self.model):
             self.optimizer.zero_grad()
 
-            # TODO 再出错，mock 小模型查看原因
             # VLA task forward propagation
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
@@ -403,27 +389,8 @@ class VLAMTrainer(TrainerUtils):
             self.optimizer.step()
             self.lr_scheduler.step()
 
-            # Disabled VLM step to prevent crashing and redundant computation
-            # self.optimizer.zero_grad()
-            # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            #     vlm_output = self.model.forward(batch_vlm)
-            #     vlm_loss = sum(vlm_output.values())
-
-            # self.accelerator.backward(vlm_loss)
-            # # gradient clipping
-            # if self.config.trainer.gradient_clipping is not None:
-            #     self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
-
-            # # optimizer step
-            # self.optimizer.step()
-            # self.lr_scheduler.step()
-            
-            vlm_output = {}
-
         for k, v in output_dict.items():
             log_dict[f"vla_{k}"] = v.item()
-        # for k, v in vlm_output.items():
-        #     log_dict[f"vlm_{k}"] = v.item()
         return log_dict
 
     def _finalize_training(self):
@@ -455,7 +422,7 @@ def main(cfg) -> None:
     # build model
     vla = build_framework(cfg)
     # prepare data
-    vla_train_dataloader, video_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
+    vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
     # set optimizer and scheduler
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
 
@@ -465,7 +432,6 @@ def main(cfg) -> None:
         cfg=cfg,
         model=vla,
         vla_train_dataloader=vla_train_dataloader,
-        video_train_dataloader=video_train_dataloader,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         accelerator=accelerator,
