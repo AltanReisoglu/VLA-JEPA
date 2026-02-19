@@ -50,10 +50,10 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=collate_fn,
-            num_workers=8,
+            num_workers=0,
             # shuffle=True
         )        
-        if dist.get_rank() == 0: 
+        if not dist.is_initialized() or dist.get_rank() == 0: 
             
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")

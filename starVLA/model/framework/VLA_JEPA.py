@@ -701,7 +701,16 @@ class VLA_JEPA(baseframework):
         #embodied_action_indices = torch.isin(qwen_inputs['input_ids'], torch.tensor([self.embodied_action_token_id], device=qwen_inputs['input_ids'].device))
         embodied_action_indices = torch.isin(qwen_inputs['input_ids'], torch.tensor([self.embodied_action_token_id], device=qwen_inputs['input_ids'].device))
         embodied_action_indices = embodied_action_indices.nonzero(as_tuple=True)
-        
+
+        # Ensure all sub-modules are on CUDA (frozen modules may stay on CPU after accelerate.prepare)
+        _dev = torch.device("cuda")
+        for _mod_name in ["slot_attention", "teacher_slot_attention", "slot_proj",
+                          "teacher_slot_proj", "action_model", "vj_predictor",
+                          "cjepa_slot_masking", "cjepa_frozen"]:
+            _mod = getattr(self, _mod_name, None)
+            if _mod is not None:
+                _mod.to(_dev)
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -867,7 +876,7 @@ class VLA_JEPA(baseframework):
 
                 # Slice target (last latent step)
                 tokens_per_teacher_latent = num_slots  # Now it matches!
-                gt_multimodal = teacher_flat[:, tokens_per_teacher_latent * (num_latents_temporal - 1):, :]
+                gt_multimodal = teacher_flat[:, tokens_per_teacher_latent * (T_t - 1):, :]
 
             # Step 3: VJ Predictor
             predicted_states = self.vj_predictor(

@@ -87,7 +87,8 @@ def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
     vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
 
-    dist.barrier()
+    if dist.is_initialized():
+        dist.barrier()
     return vla_train_dataloader
 
 
@@ -156,6 +157,22 @@ class VLAMTrainer(TrainerUtils):
             else None
         )
         self.model = self.freeze_backbones(self.model, freeze_modules=freeze_modules)
+
+        # ── Enable gradient checkpointing to save VRAM ──
+        if getattr(self.config.trainer, "enable_gradient_checkpointing", False):
+            # Qwen VL backbone
+            if hasattr(self.model, "qwen_vl_interface") and hasattr(self.model.qwen_vl_interface, "model"):
+                self.model.qwen_vl_interface.model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled for qwen_vl_interface")
+            # Action model (DiT)
+            if hasattr(self.model, "action_model") and hasattr(self.model.action_model, "gradient_checkpointing_enable"):
+                self.model.action_model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled for action_model")
+            # VJEPA2 encoder
+            if hasattr(self.model, "vj_encoder") and hasattr(self.model.vj_encoder, "gradient_checkpointing_enable"):
+                self.model.vj_encoder.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled for vj_encoder")
+            torch.cuda.empty_cache()
 
         #  print trainable parameters of the model
         self.print_trainable_parameters(self.model)
@@ -230,7 +247,7 @@ class VLAMTrainer(TrainerUtils):
         if (
             self.completed_steps % self.config.trainer.logging_frequency == 0
         ):  # some parameters should be initialized for the class
-            if dist.get_rank() == 0:
+            if not dist.is_initialized() or dist.get_rank() == 0:
                 # calculate gradient norm
                 # total_norm = 0.0
                 # for p in self.model.parameters():
@@ -306,7 +323,8 @@ class VLAMTrainer(TrainerUtils):
             if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
                 self._save_checkpoint()
 
-                dist.barrier()  # ensure all processes are synchronized, avoid timeout
+                if dist.is_initialized():
+                    dist.barrier()  # ensure all processes are synchronized, avoid timeout
 
             # check termination condition
             if self.completed_steps >= self.config.trainer.max_train_steps:
@@ -357,7 +375,8 @@ class VLAMTrainer(TrainerUtils):
             self.writer.add_scalar("mse_score", step_metrics["mse_score"], self.completed_steps)
         
         pass
-        dist.barrier()  # ensure all processes are synchronized
+        if dist.is_initialized():
+            dist.barrier()  # ensure all processes are synchronized
         return step_metrics
 
     def _log_training_config(self):
@@ -373,7 +392,7 @@ class VLAMTrainer(TrainerUtils):
         """execute single training step"""
         log_dict = {}
         with self.accelerator.accumulate(self.model):
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             # VLA task forward propagation
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -444,8 +463,9 @@ def main(cfg) -> None:
 
     # And... we're done!
     logger.info("... and that's all, folks!")
-    dist.barrier()
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

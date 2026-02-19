@@ -351,6 +351,23 @@ def load_cjepa_predictor_weights(
             f"Top-level keys found: {available_prefixes}"
         )
 
+    # --- Handle time_pos_embed temporal dimension mismatch ---
+    # Checkpoint may have been trained with more total_frames (e.g. 16)
+    # than our predictor's total_frames (e.g. 4). Interpolate if needed.
+    if "time_pos_embed" in predictor_sd:
+        ckpt_tpe = predictor_sd["time_pos_embed"]
+        mod_tpe = predictor.time_pos_embed
+        if ckpt_tpe.shape[1] != mod_tpe.shape[1]:
+            ckpt_T = ckpt_tpe.shape[1]
+            mod_T = mod_tpe.shape[1]
+            logger.info(
+                f"[CJEPAFrozen] time_pos_embed mismatch: ckpt T={ckpt_T}, "
+                f"predictor T={mod_T}. Interpolating."
+            )
+            p_flat = ckpt_tpe.squeeze(2).permute(0, 2, 1)  # (1, D, ckpt_T)
+            p_interp = F.interpolate(p_flat, size=mod_T, mode="linear", align_corners=False)
+            predictor_sd["time_pos_embed"] = p_interp.permute(0, 2, 1).unsqueeze(2)
+
     missing, unexpected = predictor.load_state_dict(predictor_sd, strict=True)
     if missing:
         logger.warning(f"[CJEPAFrozen] Missing keys: {missing}")
@@ -846,6 +863,22 @@ def _load_masking_weights_from_ckpt(
                 target = getattr(target, p)
             # Handle Parameter vs buffer
             attr = getattr(target, parts[-1])
+
+            # --- Handle time_pos_embed temporal dimension mismatch ---
+            # Checkpoint may have been trained with more total_frames (e.g. 16)
+            # than our module's total_frames (e.g. 4). Interpolate if needed.
+            if mod_key == "time_pos_embed" and param.shape[1] != attr.shape[1]:
+                ckpt_T = param.shape[1]
+                mod_T = attr.shape[1]
+                logger.info(
+                    f"[CJEPAFrozenSlotMasking] time_pos_embed shape mismatch: "
+                    f"ckpt has T={ckpt_T}, module expects T={mod_T}. Interpolating."
+                )
+                # param: (1, ckpt_T, 1, D) → rearrange for F.interpolate
+                p_flat = param.squeeze(2).permute(0, 2, 1)  # (1, D, ckpt_T)
+                p_interp = F.interpolate(p_flat, size=mod_T, mode="linear", align_corners=False)
+                param = p_interp.permute(0, 2, 1).unsqueeze(2)  # (1, mod_T, 1, D)
+
             if isinstance(attr, nn.Parameter):
                 attr.data.copy_(param)
             else:

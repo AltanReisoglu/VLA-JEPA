@@ -327,6 +327,47 @@ def test_masking_ckpt(pred):
     finally:
         os.unlink(p)
 
+    # --- Test time_pos_embed shape mismatch (ckpt T=16, module T=4) ---
+    print("\n=== TEST 9b: Masking weight loading with time_pos_embed mismatch ===")
+    big_pred = MaskedSlotPredictor(
+        num_slots=CJEPA_NUM_SLOTS, slot_dim=CJEPA_SLOT_DIM,
+        history_frames=12, pred_frames=4,  # total_frames=16
+        num_masked_slots=CJEPA_NUM_MASKED, seed=CJEPA_SEED,
+        depth=CJEPA_DEPTH, heads=CJEPA_HEADS,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".ckpt", delete=False) as f:
+        p = f.name
+    try:
+        _save_no_prefix(big_pred, p)
+        # Load into masking module with T=4
+        m2 = CJEPAFrozenSlotMasking(
+            cjepa_slot_dim=CJEPA_SLOT_DIM, student_slot_dim=STUDENT_SLOT_DIM,
+            num_slots=CJEPA_NUM_SLOTS, history_frames=CJEPA_HISTORY,
+            pred_frames=CJEPA_PRED, num_masked_slots=CJEPA_NUM_MASKED,
+        )
+        try:
+            _load_masking_weights_from_ckpt(m2, p)
+            check(m2.time_pos_embed.shape == (1, 4, 1, CJEPA_SLOT_DIM),
+                  f"time_pos_embed interpolated to T=4: {m2.time_pos_embed.shape}")
+        except RuntimeError as e:
+            check(False, f"time_pos_embed mismatch not handled: {e}")
+
+        # Load into predictor with T=4
+        small_pred = MaskedSlotPredictor(
+            num_slots=CJEPA_NUM_SLOTS, slot_dim=CJEPA_SLOT_DIM,
+            history_frames=CJEPA_HISTORY, pred_frames=CJEPA_PRED,
+            num_masked_slots=CJEPA_NUM_MASKED, seed=CJEPA_SEED,
+            depth=CJEPA_DEPTH, heads=CJEPA_HEADS,
+        )
+        try:
+            load_cjepa_predictor_weights(small_pred, p)
+            check(small_pred.time_pos_embed.shape == (1, 4, 1, CJEPA_SLOT_DIM),
+                  f"predictor time_pos_embed interpolated to T=4: {small_pred.time_pos_embed.shape}")
+        except RuntimeError as e:
+            check(False, f"predictor time_pos_embed mismatch not handled: {e}")
+    finally:
+        os.unlink(p)
+
 
 # ======================================================================
 # TEST 10: Full VLA_JEPA.forward() simulation (Steps 2b->2c)

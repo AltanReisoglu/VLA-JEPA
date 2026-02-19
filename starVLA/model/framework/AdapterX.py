@@ -149,9 +149,6 @@ class MultiModalTargetEncoder(nn.Module):
             else:
                 text_tokens = text_outputs
 
-        print(text_tokens.shape, "text_tokens.shape")
-        print(visual_tokens.shape, "visual_tokens.shape")
-        
         # Project text to visual dimension (removed for concatenation)
         #text_tokens = self.text_projector(text_tokens)  # [B, L, 2048]
         
